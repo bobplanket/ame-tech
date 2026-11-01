@@ -1,0 +1,39 @@
+name: Tests
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unittest:
+    name: Tests (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.13"
+      - name: Tests du dépôt (tests/)
+        shell: bash
+        run: python -m unittest discover -s tests -v
+      - name: Tests du paquet (windows/ametech/tests/, s'il existe)
+        shell: bash
+        run: |
+          if [ -d windows/ametech/tests ]; then
+            python -m unittest discover -s windows/ametech/tests -t windows -v
+          fi

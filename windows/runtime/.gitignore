@@ -1,0 +1,6 @@
+# Entrées et sorties de construction (jamais versionnées)
+.build/
+python/
+dist/
+__pycache__/
+*.pyc

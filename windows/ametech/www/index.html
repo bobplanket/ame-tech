@@ -1,0 +1,292 @@
+<!doctype html>
+<!--
+  AME Tech, fenêtre du relais ProPresenter (agent interface).
+
+  INJECTION DU JETON (pour ui_server.py) :
+  le marqueur est le mot JETON entre doubles accolades ouvrantes et fermantes. Il
+  n'apparaît qu'une seule fois dans ce fichier (ce commentaire ne le contient pas),
+  dans la balise script qui affecte window.AMETECH_JETON, juste avant app.js.
+  Le serveur le remplace par le jeton anti-CSRF (caractères sûrs, sans guillemet ni
+  barre oblique inverse) chaque fois qu'il sert / ou /index.html.
+  app.js envoie ce jeton dans l'en-tête X-Jeton de chaque POST. Les GET n'en portent pas
+  (EventSource sur /api/pp/flux et lien de téléchargement /api/rapport compris).
+
+  Fichiers servis à côté : app.css, app.js, assets/logo-ame.png, assets/oswald-latin.woff2,
+  assets/qr-whatsapp.svg. Aucune ressource externe : la fenêtre marche hors ligne.
+-->
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>AME Tech</title>
+<link rel="icon" href="assets/logo-ame.png">
+<link rel="stylesheet" href="app.css">
+<script>window.AMETECH_JETON="{{JETON}}";</script>
+<script src="app.js" defer></script>
+</head>
+<body>
+<a class="saut" href="#contenu">Aller au contenu</a>
+
+<header class="entete">
+  <div class="marque">
+    <img src="assets/logo-ame.png" alt="" width="44" height="44">
+    <div>
+      <h1><span class="ame-or">AME</span> Tech</h1>
+      <p class="sous-titre">Relais ProPresenter <span id="version-entete"></span></p>
+    </div>
+  </div>
+  <nav class="onglets" role="tablist" aria-label="Sections">
+    <button type="button" role="tab" id="onglet-relais" aria-controls="vue-relais" aria-selected="true">Relais</button>
+    <button type="button" role="tab" id="onglet-debug" aria-controls="vue-debug" aria-selected="false" tabindex="-1">Débug <span id="pastille-erreurs" class="pastille" hidden></span></button>
+  </nav>
+  <div class="outils-entete">
+    <button type="button" class="bouton-icone" id="bouton-molette" aria-haspopup="dialog" title="Molette technique">
+      <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true" focusable="false"><path fill="currentColor" d="M19.43 12.98c.04-.32.07-.64.07-.98s-.03-.66-.07-.98l2.11-1.65a.5.5 0 0 0 .12-.64l-2-3.46a.5.5 0 0 0-.61-.22l-2.49 1a7.3 7.3 0 0 0-1.69-.98l-.38-2.65A.49.49 0 0 0 14 2h-4a.49.49 0 0 0-.49.42l-.38 2.65c-.61.25-1.17.59-1.69.98l-2.49-1a.5.5 0 0 0-.61.22l-2 3.46a.49.49 0 0 0 .12.64l2.11 1.65c-.04.32-.07.65-.07.98s.03.66.07.98l-2.11 1.65a.5.5 0 0 0-.12.64l2 3.46c.12.22.39.3.61.22l2.49-1c.52.4 1.08.73 1.69.98l.38 2.65c.03.24.24.42.49.42h4c.25 0 .46-.18.49-.42l.38-2.65c.61-.25 1.17-.59 1.69-.98l2.49 1c.23.09.49 0 .61-.22l2-3.46a.5.5 0 0 0-.12-.64l-2.11-1.65zM12 15.5A3.5 3.5 0 1 1 12 8.5a3.5 3.5 0 0 1 0 7z"/></svg>
+      <span class="visuellement-cache">Molette technique</span>
+    </button>
+    <button type="button" class="bouton bouton-discret" id="bouton-quitter">Quitter</button>
+  </div>
+</header>
+
+<div id="bandeaux" class="bandeaux">
+  <div id="bandeau-panne" class="bandeau bandeau-rouge" role="alert" hidden>
+    <strong>AME Tech ne répond plus.</strong> <span>Relancez le logiciel depuis son raccourci. Si cela persiste, appelez l'assistance ci-dessous.</span>
+  </div>
+  <div id="bandeau-horloge" class="bandeau bandeau-orange" role="alert" hidden>
+    <strong>Horloge du PC décalée.</strong> <span id="bandeau-horloge-texte"></span>
+  </div>
+</div>
+
+<main id="contenu" class="contenu" tabindex="-1">
+
+  <!-- Onglet Relais -->
+  <section id="vue-relais" role="tabpanel" aria-labelledby="onglet-relais" class="vue">
+
+    <!-- Poste non enrôlé -->
+    <div id="bloc-enrolement" class="grille-relais" hidden>
+      <article class="carte carte-enrolement">
+        <h2>Enrôler ce poste</h2>
+        <p>Ce PC n'a pas encore de code d'accès. Will Hardy l'obtient sur <strong>tech.ame.paris/admin.html</strong> (code d'enrôlement ou QR) et vous le transmet. Il ne sert qu'une fois : le secret reste chiffré sur ce compte Windows.</p>
+        <form id="form-enrolement" class="pile">
+          <label for="texte-enrolement">Code d'enrôlement <span class="aide">(commence par AMETECH1: ou otpauth://)</span></label>
+          <textarea id="texte-enrolement" rows="3" autocomplete="off" spellcheck="false" autocapitalize="off" required placeholder="AMETECH1:..."></textarea>
+          <p id="erreur-enrolement" class="message-erreur" role="alert" hidden></p>
+          <div class="rangee">
+            <button type="submit" class="bouton bouton-principal" id="bouton-enroler">Enrôler ce poste</button>
+          </div>
+        </form>
+      </article>
+      <div class="pile">
+        <article class="carte">
+          <h2>Et ensuite ?</h2>
+          <p>Une fois le poste enrôlé, cet écran affiche l'état du relais, le bouton <strong>Démarrer le relais ProPresenter</strong> et le code à 6 chiffres qui ouvre tech.ame.paris.</p>
+        </article>
+        <article class="carte carte-maj" data-maj></article>
+      </div>
+    </div>
+
+    <!-- Poste enrôlé -->
+    <div id="bloc-relais" class="grille-relais" hidden>
+      <article class="carte carte-etat" id="carte-etat" data-phase="arret">
+        <div class="etat-tete">
+          <span class="voyant" aria-hidden="true"></span>
+          <div>
+            <h2 class="etiquette">État du relais</h2>
+            <p class="etat-phase" id="etat-phase" aria-live="polite">Chargement</p>
+          </div>
+        </div>
+        <p class="etat-message" id="etat-message"></p>
+        <dl class="etat-details">
+          <div><dt>ProPresenter</dt><dd id="etat-pp">-</dd></div>
+          <div><dt>Serveur</dt><dd id="etat-cible">-</dd></div>
+          <div><dt>Dernier texte</dt><dd id="etat-texte" class="dernier-texte">-</dd></div>
+          <div><dt>Dans cet état depuis</dt><dd id="etat-depuis">-</dd></div>
+        </dl>
+        <div class="rangee actions-relais">
+          <button type="button" class="bouton bouton-principal bouton-grand" id="bouton-demarrer">
+            <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" focusable="false"><path fill="currentColor" d="M8 5v14l11-7z"/></svg>
+            Démarrer le relais ProPresenter
+          </button>
+          <button type="button" class="bouton bouton-secondaire bouton-grand" id="bouton-arreter">
+            <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" focusable="false"><path fill="currentColor" d="M6 6h12v12H6z"/></svg>
+            Arrêter
+          </button>
+        </div>
+        <div class="bloc-mode">
+          <span class="etiquette" id="etiquette-mode">Mode</span>
+          <div class="bascule" role="radiogroup" aria-labelledby="etiquette-mode">
+            <button type="button" role="radio" aria-checked="true" data-mode="auto" id="mode-auto">Auto</button>
+            <button type="button" role="radio" aria-checked="false" data-mode="manuel" id="mode-manuel" tabindex="-1">Manuel</button>
+          </div>
+          <p class="aide" id="aide-mode">Auto : ProPresenter pilote les textes à l'écran. Manuel : la régie reprend la main sur tech.ame.paris.</p>
+        </div>
+      </article>
+
+      <div class="pile">
+        <article class="carte carte-code">
+          <h2 class="etiquette">Code d'accès tech.ame.paris</h2>
+          <p class="code" id="code" aria-describedby="code-reste"><span id="code-a">---</span><span id="code-b">---</span></p>
+          <div class="barre" aria-hidden="true"><div class="barre-remplie" id="code-barre"></div></div>
+          <div class="rangee rangee-code">
+            <p class="aide" id="code-reste">Nouveau code dans -- s</p>
+            <button type="button" class="bouton bouton-or" id="bouton-copier">Copier</button>
+          </div>
+        </article>
+        <article class="carte carte-maj" data-maj></article>
+      </div>
+    </div>
+  </section>
+
+  <!-- Onglet Débug -->
+  <section id="vue-debug" role="tabpanel" aria-labelledby="onglet-debug" class="vue" hidden>
+    <div class="grille-debug">
+      <article class="carte carte-diagnostic">
+        <div class="rangee rangee-titre">
+          <h2>Diagnostic</h2>
+          <button type="button" class="bouton bouton-secondaire bouton-petit" id="bouton-diagnostic">Relancer</button>
+        </div>
+        <ol id="liste-diagnostic" class="diagnostic" aria-live="polite"></ol>
+        <p class="aide">Chaque maillon est testé dans l'ordre : le premier en rouge est celui à régler.</p>
+        <a class="bouton bouton-or" id="lien-rapport" href="/api/rapport" download>Exporter le rapport</a>
+        <p class="aide">Fichier ZIP sans secret, à envoyer à Will Hardy.</p>
+      </article>
+      <article class="carte carte-journal">
+        <div class="rangee rangee-titre">
+          <h2>Journal en direct</h2>
+          <div class="rangee filtres">
+            <label for="filtre-niveau">Niveau</label>
+            <select id="filtre-niveau">
+              <option value="">Tous</option>
+              <option value="info">Info</option>
+              <option value="alerte">Alertes</option>
+              <option value="erreur">Erreurs</option>
+            </select>
+            <label class="case"><input type="checkbox" id="suivre-journal" checked> Suivre</label>
+            <button type="button" class="bouton bouton-secondaire bouton-petit" id="bouton-vider-journal">Effacer l'affichage</button>
+          </div>
+        </div>
+        <div id="journal" class="journal" role="log" aria-label="Journal du relais" tabindex="0"></div>
+      </article>
+    </div>
+  </section>
+</main>
+
+<!-- Assistance, toujours visible -->
+<footer class="assistance" aria-labelledby="titre-assistance">
+  <img class="qr" src="assets/qr-whatsapp.svg" width="96" height="96" alt="QR code WhatsApp de Will Hardy (wa.me/14384582683)">
+  <div class="assistance-texte">
+    <h2 id="titre-assistance">Assistance</h2>
+    <p>En cas d'assistance, contacter Will Hardy : WhatsApp <a href="https://wa.me/14384582683" target="_blank" rel="noopener">+1 (438) 458-2683</a> ou <a href="mailto:bonjour@tmgconseil.fr">bonjour@tmgconseil.fr</a></p>
+    <p id="assistance-etat" class="aide" aria-live="polite"></p>
+  </div>
+  <div class="assistance-actions">
+    <div id="rustdesk-id-bloc" class="rustdesk-id" hidden>
+      <span class="etiquette">Identifiant à dicter</span>
+      <span id="rustdesk-id" class="rustdesk-chiffres"></span>
+    </div>
+    <button type="button" class="bouton bouton-principal" id="bouton-rustdesk">Assistance à distance</button>
+    <a class="lien-secondaire" href="https://www.teamviewer.com/fr/telechargement/windows/" target="_blank" rel="noopener">TeamViewer QuickSupport (second choix)</a>
+  </div>
+</footer>
+
+<!-- Molette technique -->
+<dialog id="molette" class="fenetre fenetre-large" aria-labelledby="titre-molette">
+  <div class="fenetre-tete">
+    <h2 id="titre-molette">Molette technique</h2>
+    <button type="button" class="bouton-icone" data-fermer aria-label="Fermer la molette technique">
+      <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" focusable="false"><path fill="currentColor" d="M19 6.4 17.6 5 12 10.6 6.4 5 5 6.4 10.6 12 5 17.6 6.4 19 12 13.4 17.6 19 19 17.6 13.4 12z"/></svg>
+    </button>
+  </div>
+  <nav class="onglets onglets-molette" role="tablist" aria-label="Molette technique">
+    <button type="button" role="tab" id="m-onglet-pp" aria-controls="m-vue-pp" aria-selected="true">API ProPresenter</button>
+    <button type="button" role="tab" id="m-onglet-reglages" aria-controls="m-vue-reglages" aria-selected="false" tabindex="-1">Réglages</button>
+    <button type="button" role="tab" id="m-onglet-enrolement" aria-controls="m-vue-enrolement" aria-selected="false" tabindex="-1">Enrôlement</button>
+  </nav>
+  <div class="fenetre-corps">
+    <section id="m-vue-pp" role="tabpanel" aria-labelledby="m-onglet-pp" class="grille-pp">
+      <div class="pile">
+        <div class="rangee rangee-titre">
+          <h3>Informations</h3>
+          <button type="button" class="bouton bouton-secondaire bouton-petit" id="bouton-pp-info">Rafraîchir</button>
+        </div>
+        <dl id="pp-info" class="liste-cles"></dl>
+        <h3>Requête brute</h3>
+        <form id="form-requete" class="pile">
+          <div class="rangee rangee-requete">
+            <label for="req-methode" class="visuellement-cache">Méthode</label>
+            <select id="req-methode"><option>GET</option><option>POST</option><option>PUT</option></select>
+            <label for="req-chemin" class="visuellement-cache">Chemin</label>
+            <input id="req-chemin" type="text" value="/v1/status/layers" spellcheck="false" autocomplete="off">
+            <button type="submit" class="bouton bouton-principal bouton-petit">Envoyer</button>
+          </div>
+          <label for="req-corps">Corps JSON <span class="aide">(POST et PUT)</span></label>
+          <textarea id="req-corps" rows="3" spellcheck="false" autocomplete="off" placeholder='{"exemple": true}'></textarea>
+        </form>
+        <p class="aide" id="req-statut" aria-live="polite">Chemin limité à /v1/, envoyé seulement au ProPresenter de ce PC.</p>
+        <pre id="req-reponse" class="sortie" tabindex="0" aria-label="Réponse de ProPresenter"></pre>
+      </div>
+      <div class="pile">
+        <div class="rangee rangee-titre">
+          <h3>Flux d'événements</h3>
+          <div class="rangee">
+            <button type="button" class="bouton bouton-secondaire bouton-petit" id="bouton-flux" aria-pressed="false">Écouter</button>
+            <button type="button" class="bouton bouton-secondaire bouton-petit" id="bouton-flux-vider">Vider</button>
+          </div>
+        </div>
+        <p class="aide" id="flux-etat" aria-live="polite">Flux arrêté.</p>
+        <div id="flux" class="sortie flux" tabindex="0" aria-label="Événements ProPresenter"></div>
+      </div>
+    </section>
+
+    <section id="m-vue-reglages" role="tabpanel" aria-labelledby="m-onglet-reglages" hidden>
+      <form id="form-reglages" class="pile reglages">
+        <label for="reg-cibles">Serveurs cibles <span class="aide">(un par ligne, dans l'ordre d'essai)</span></label>
+        <textarea id="reg-cibles" rows="3" spellcheck="false" autocomplete="off"></textarea>
+        <label for="reg-port">Port ProPresenter <span class="aide">(0 = détection automatique)</span></label>
+        <input id="reg-port" type="number" min="0" max="65535" step="1" inputmode="numeric">
+        <label class="case"><input type="checkbox" id="reg-demarrage"> Démarrer AME Tech avec Windows</label>
+        <label class="case"><input type="checkbox" id="reg-lancement"> Démarrer le relais dès l'ouverture d'AME Tech</label>
+        <p id="reg-message" class="aide" role="status"></p>
+        <div class="rangee">
+          <button type="submit" class="bouton bouton-principal">Enregistrer</button>
+          <button type="button" class="bouton bouton-secondaire" id="bouton-reglages-recharger">Annuler les modifications</button>
+        </div>
+      </form>
+    </section>
+
+    <section id="m-vue-enrolement" role="tabpanel" aria-labelledby="m-onglet-enrolement" hidden>
+      <div class="pile reglages">
+        <p id="enrolement-etat"></p>
+        <p>Oublier l'enrôlement efface le secret de ce PC. Le relais s'arrête et il faudra un nouveau code d'enrôlement de Will Hardy pour le relancer.</p>
+        <div class="rangee">
+          <button type="button" class="bouton bouton-danger" id="bouton-oublier">Oublier l'enrôlement</button>
+        </div>
+      </div>
+    </section>
+  </div>
+</dialog>
+
+<!-- Confirmation générique -->
+<dialog id="confirmation" class="fenetre" aria-labelledby="confirmation-titre" aria-describedby="confirmation-texte">
+  <form method="dialog" class="pile">
+    <h2 id="confirmation-titre"></h2>
+    <p id="confirmation-texte"></p>
+    <div class="rangee rangee-fin">
+      <button type="submit" value="non" class="bouton bouton-secondaire" id="confirmation-non">Annuler</button>
+      <button type="submit" value="oui" class="bouton bouton-danger" id="confirmation-oui">Confirmer</button>
+    </div>
+  </form>
+</dialog>
+
+<div id="ecran-ferme" class="ecran-ferme" hidden>
+  <div class="carte">
+    <img src="assets/logo-ame.png" alt="" width="96" height="96">
+    <h2>AME Tech est fermé</h2>
+    <p>Le relais est arrêté. Vous pouvez fermer cette fenêtre.</p>
+  </div>
+</div>
+
+<div id="annonce" class="annonce" role="status" aria-live="polite"></div>
+</body>
+</html>

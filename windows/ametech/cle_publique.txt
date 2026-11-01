@@ -1,0 +1,4 @@
+# Clé publique Ed25519 de signature des mises à jour AME Tech (base64, 32 octets).
+# La graine privée correspondante vit seulement dans le secret GitHub AMETECH_SIGNING_KEY
+# (environnement « release »). Ne jamais la commiter.
+RO9OnkaAulP1+hp1NDop4uR9NDqGxHQzLonLZ15YWAo=

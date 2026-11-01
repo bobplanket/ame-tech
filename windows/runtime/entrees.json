@@ -1,0 +1,30 @@
+{
+  "python": {
+    "version": "3.13.17",
+    "fichier": "python-3.13.17-embed-amd64.zip",
+    "url": "https://www.python.org/ftp/python/3.13.17/python-3.13.17-embed-amd64.zip",
+    "sha256": "9e35319bffedab8b36ad44d8f377cb4f1733bcec257a0b6d04d94f01486ddb38",
+    "source_empreinte": "https://www.python.org/ftp/python/3.13.17/python-3.13.17-embed-amd64.zip.spdx.json (SHA256 vérifié le 2026-11-01)",
+    "pth": "python313._pth",
+    "pth_contenu": "python313.zip\n.\n..\\..\n# import site deliberately disabled\n"
+  },
+  "zig": {
+    "version": "0.15.2",
+    "role": "compilateur de construction seulement, jamais distribué",
+    "source_empreinte": "https://ziglang.org/download/index.json",
+    "plateformes": {
+      "x86_64-linux": {
+        "url": "https://ziglang.org/download/0.15.2/zig-x86_64-linux-0.15.2.tar.xz",
+        "sha256": "02aa270f183da276e5b5920b1dac44a63f1a49e55050ebde3aecc9eb82f93239"
+      },
+      "x86_64-windows": {
+        "url": "https://ziglang.org/download/0.15.2/zig-x86_64-windows-0.15.2.zip",
+        "sha256": "3a0ed1e8799a2f8ce2a6e6290a9ff22e6906f8227865911fb7ddedc3cc14cb0c"
+      },
+      "aarch64-macos": {
+        "url": "https://ziglang.org/download/0.15.2/zig-aarch64-macos-0.15.2.tar.xz",
+        "sha256": "3cc2bab367e185cdfb27501c4b30b1b0653c28d9f73df8dc91488e66ece5fa6b"
+      }
+    }
+  }
+}

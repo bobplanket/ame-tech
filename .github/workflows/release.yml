@@ -1,0 +1,161 @@
+name: Publication
+
+# Un tag vX.Y.Z (égal à VERSION de windows/ametech/version.py) publie la release :
+# tests, construction du ZIP Windows, essai sur un vrai Windows, signature Ed25519
+# du manifeste (secret AMETECH_SIGNING_KEY de l'environnement « release »), puis
+# publication de AME-Tech-Windows.zip, manifest.json, manifest.json.sig et ame-tech.lua.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publication-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  tests:
+    name: Tests (${{ matrix.os }})
+    strategy:
+      fail-fast: true
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.13"
+      - name: Tests du dépôt (tests/)
+        shell: bash
+        run: python -m unittest discover -s tests -v
+      - name: Tests du paquet (windows/ametech/tests/, s'il existe)
+        shell: bash
+        run: |
+          if [ -d windows/ametech/tests ]; then
+            python -m unittest discover -s windows/ametech/tests -t windows -v
+          fi
+
+  construction:
+    name: Construction du ZIP Windows
+    needs: tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.13"
+      - name: Entrées épinglées (Python embarquable 3.13 x64, Zig)
+        run: python windows/runtime/fetch_runtime.py
+      - name: Lanceur AME Tech.exe
+        run: python windows/runtime/build_launcher.py
+      - name: ZIP et manifeste
+        run: |
+          export SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)"
+          NOTES="$(git for-each-ref --format='%(contents:subject)' "refs/tags/${GITHUB_REF_NAME}")"
+          [ -n "$NOTES" ] || NOTES="AME Tech ${GITHUB_REF_NAME#v}"
+          python windows/build_zip.py --tag "$GITHUB_REF_NAME" --sortie dist \
+            --supplement obs/ame-tech.lua --notes "$NOTES"
+          cp windows/runtime/.build/BUILD-VERIFICATION.json dist/
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: paquet-windows
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+
+  essai-windows:
+    name: Essai sur Windows
+    needs: construction
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: paquet-windows
+          path: dist
+      - name: Extraire le ZIP
+        shell: pwsh
+        run: Expand-Archive -Path dist/AME-Tech-Windows.zip -DestinationPath essai
+      - name: Moteur embarqué, chemin d'import et modules de mise à jour
+        shell: pwsh
+        run: |
+          & "essai\runtime\python\python.exe" -I -c "import sys, ametech.maj as m, ametech.ed25519, ametech.demarrage; from ametech.version import VERSION; assert sys.version_info[:2] == (3, 13), sys.version; assert m.cle_version(VERSION); print('ametech', VERSION, 'sur Python', sys.version)"
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+      - name: Lanceur AME Tech.exe puis /api/etat
+        shell: pwsh
+        run: |
+          $env:LOCALAPPDATA = Join-Path $PWD "donnees-locales"
+          $env:APPDATA = Join-Path $PWD "donnees-itinerantes"
+          New-Item -ItemType Directory -Force $env:LOCALAPPDATA, $env:APPDATA | Out-Null
+          $attendue = (Get-Content essai\version.txt).Trim()
+          Start-Process -FilePath (Resolve-Path "essai\AME Tech.exe")
+          $ok = $false
+          for ($i = 0; $i -lt 60 -and -not $ok; $i++) {
+            Start-Sleep -Seconds 1
+            foreach ($port in 48690..48699) {
+              try {
+                $r = Invoke-RestMethod -Uri "http://127.0.0.1:$port/api/etat" -TimeoutSec 2
+                if ($r.version -eq $attendue) { $ok = $true; Write-Host "Version $attendue sur le port $port"; break }
+              } catch {}
+            }
+          }
+          Get-Content (Join-Path $env:LOCALAPPDATA "AME Tech\lanceur.log") -ErrorAction SilentlyContinue
+          Stop-Process -Name "AME Tech", "pythonw" -Force -ErrorAction SilentlyContinue
+          if (-not $ok) { Write-Error "AME Tech n'a pas répondu sur /api/etat en 60 s"; exit 1 }
+
+  publication:
+    name: Signature et publication
+    needs: [construction, essai-windows]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: release
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.13"
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: paquet-windows
+          path: dist
+      - name: Signer le manifeste
+        env:
+          AMETECH_SIGNING_KEY: ${{ secrets.AMETECH_SIGNING_KEY }}
+        run: python outils/signer_manifeste.py dist/manifest.json
+      - name: Contrôler la signature comme le fera le client
+        run: |
+          python - <<'EOF'
+          import base64, sys
+          from pathlib import Path
+          sys.path.insert(0, "windows")
+          from ametech import ed25519, maj
+          cle, est_test = maj.charger_cle(Path("windows/ametech/cle_publique.txt"))
+          assert cle and not est_test, "clé publique absente ou de test"
+          brut = Path("dist/manifest.json").read_bytes()
+          sig = base64.b64decode(Path("dist/manifest.json.sig").read_text().strip(), validate=True)
+          assert ed25519.verifier(cle, brut, sig), "signature refusée"
+          print("Signature vérifiée pour", maj.analyser_manifeste(brut)["version"])
+          EOF
+      - name: Publier la release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python -c "import json; print(json.load(open('dist/manifest.json'))['notes'])" > dist/notes.txt
+          gh release create "$GITHUB_REF_NAME" \
+            dist/AME-Tech-Windows.zip dist/manifest.json dist/manifest.json.sig dist/ame-tech.lua \
+            --repo "$GITHUB_REPOSITORY" --title "AME Tech ${GITHUB_REF_NAME#v}" \
+            --notes-file dist/notes.txt --verify-tag --latest

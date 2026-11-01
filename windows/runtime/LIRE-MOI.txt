@@ -1,0 +1,45 @@
+AME Tech {version} pour Windows
+================================
+
+AME Tech envoie les textes de ProPresenter vers l'habillage du culte
+(tech.ame.paris) et affiche le code à 6 chiffres qui ouvre la régie.
+
+Installation
+------------
+1. Extrayez tout le ZIP dans un dossier stable, par exemple
+   Documents\AME Tech (pas dans Téléchargements, qu'on vide parfois).
+2. Double-cliquez sur « AME Tech.exe ».
+3. Au premier lancement, Windows peut afficher « Windows a protégé votre
+   ordinateur » (éditeur inconnu) : cliquez sur « Informations
+   complémentaires » puis « Exécuter quand même ».
+4. Collez le code d'enrôlement remis par l'administrateur. Il n'est écrit
+   nulle part dans ce ZIP : demandez-le à l'administrateur si vous ne l'avez
+   pas reçu.
+
+Aucune installation de Python, aucun droit administrateur, aucune
+modification du registre. Le moteur Python inclus est la distribution
+officielle « embeddable » de python.org.
+
+Utilisation
+-----------
+- « Démarrer le relais ProPresenter » : ProPresenter doit être ouvert, avec
+  l'API réseau activée (Réglages > Réseau).
+- Le voyant vert indique que les textes partent bien vers le site.
+- L'onglet Débug montre le journal et permet d'exporter un rapport (sans
+  aucun secret) à envoyer en cas de souci.
+- Le réglage « Lancer au démarrage de Windows » ajoute un raccourci dans le
+  dossier Démarrage de votre session.
+
+Mises à jour
+------------
+AME Tech vérifie les nouvelles versions au lancement puis toutes les 6
+heures. Une mise à jour n'est installée que si sa signature numérique est
+valide, et jamais pendant que le relais transmet. Si la nouvelle version ne
+démarre pas, AME Tech revient tout seul à la version précédente.
+
+Les versions installées se trouvent dans %LOCALAPPDATA%\AME Tech\versions.
+Le journal du lanceur se trouve dans %LOCALAPPDATA%\AME Tech\lanceur.log.
+
+Assistance
+----------
+Will Hardy : WhatsApp +1 (438) 458-2683 ou bonjour@tmgconseil.fr.
