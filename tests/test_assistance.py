@@ -19,6 +19,8 @@ sys.path.insert(0, str(RACINE / "windows"))
 
 from ametech import assistance  # noqa: E402
 
+_RUSTDESK_EN_COURS = assistance._rustdesk_en_cours  # la vraie fonction, avant toute doublure
+
 CONTENU = b"MZ faux executable RustDesk " * 4000
 SHA_CONTENU = hashlib.sha256(CONTENU).hexdigest()
 
@@ -216,6 +218,26 @@ class TestEtatEtLancement(BaseTemp):
         self.assertTrue(res["ok"])
         self.assertIsNone(res["id"])
         self.assertIn("pas pu être lu", res["message"])
+
+    def test_etat_ne_lance_tasklist_qu_une_fois_par_10_s(self):
+        """/api/etat est appelé chaque seconde : pas un processus tasklist à chaque fois."""
+        p = mock.patch.object(assistance, "_rustdesk_en_cours", _RUSTDESK_EN_COURS)
+        p.start()
+        self.addCleanup(p.stop)
+        chemin = assistance.chemin_executable()
+        chemin.parent.mkdir(parents=True)
+        chemin.write_bytes(CONTENU)
+        appels = []
+        horloge = [1000.0]
+        with mock.patch.object(assistance, "_tasklist_rustdesk", lambda: appels.append(1) or True, create=True), \
+                mock.patch.object(assistance.time, "monotonic", lambda: horloge[0]):
+            getattr(assistance, "_oublier_cache_processus", lambda: None)()
+            for _ in range(5):
+                self.assertEqual(assistance.etat()["rustdesk"], "lance")
+            self.assertEqual(len(appels), 1)
+            horloge[0] += 10.5
+            assistance.etat()
+            self.assertEqual(len(appels), 2)
 
     def test_hors_windows(self):
         with mock.patch.object(assistance, "_EST_WINDOWS", False):

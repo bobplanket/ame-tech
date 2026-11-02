@@ -21,8 +21,9 @@ Chaîne de confiance :
    sa version dans les 30 s, la garde remet l'ancien pointeur, arrête le
    processus défaillant et note l'échec.
 
-Une mise à jour n'est jamais appliquée pendant que le relais est `en_ligne` et
-transmet (dernière trame il y a moins de 10 minutes).
+Une mise à jour n'est jamais appliquée pendant que le relais tourne (toute phase
+autre que `arret`), sauf s'il n'a transmis aucun texte depuis 10 minutes. Le
+relais qui tournait est relancé après la mise à jour (`__main__`).
 
 Entrées du manifeste `fichiers` : une entrée dont le `chemin` est un membre du
 ZIP décrit ce membre (contrôlé après extraction) ; les autres entrées (par
@@ -86,7 +87,7 @@ FICHIERS_OBLIGATOIRES = (
     "runtime/python/pythonw.exe",
 )
 
-_RE_VERSION = re.compile(r"^(0|[1-9]\d{0,4})\.(0|[1-9]\d{0,4})\.(0|[1-9]\d{0,4})$")
+_RE_VERSION = re.compile(r"(0|[1-9]\d{0,4})\.(0|[1-9]\d{0,4})\.(0|[1-9]\d{0,4})", re.ASCII)
 _RE_SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _RE_VERSION_PY = re.compile(r"""^VERSION\s*=\s*["']([^"']+)["']\s*$""", re.M)
 _CARACTERES_INTERDITS = set('<>:"|?*\\')
@@ -104,7 +105,7 @@ def cle_version(texte: object) -> tuple[int, int, int] | None:
     """(majeur, mineur, correctif) pour une version X.Y.Z stricte, sinon None."""
     if not isinstance(texte, str):
         return None
-    m = _RE_VERSION.match(texte)
+    m = _RE_VERSION.fullmatch(texte)
     return tuple(int(x) for x in m.groups()) if m else None  # type: ignore[return-value]
 
 
@@ -373,8 +374,13 @@ class Majeur:
             longueur = reponse.headers.get("Content-Length")
             if longueur and longueur.isdigit() and int(longueur) > limite:
                 raise ErreurMaj("Fichier distant trop volumineux.")
+            # read1 rend ce qui est arrivé (une seule lecture réseau) : le délai total est
+            # contrôlé même face à un serveur qui goutte, au pire avec un délai réseau de retard.
+            lire_bloc = getattr(reponse, "read1", reponse.read)
             while True:
-                bloc = reponse.read(256 * 1024)
+                if time.monotonic() - debut > delai_total:
+                    raise ErreurMaj("Téléchargement trop lent, abandon.")
+                bloc = lire_bloc(256 * 1024)
                 if not bloc:
                     break
                 total += len(bloc)
@@ -456,7 +462,11 @@ class Majeur:
         self._relais = relais
 
     def relais_occupe(self) -> bool:
-        """True si le relais est en ligne et a transmis il y a moins de 10 minutes (ou état inconnu)."""
+        """True si le relais tourne (toute phase sauf `arret`) ou si son état est inconnu.
+
+        Seule exception : aucun texte transmis depuis 10 minutes (dernière trame non vide,
+        ou, s'il n'a jamais rien transmis, 10 minutes passées dans la même phase).
+        """
         if self._relais is None:
             return True
         try:
@@ -466,11 +476,17 @@ class Majeur:
         r = etat.get("relais") if isinstance(etat, dict) and isinstance(etat.get("relais"), dict) else etat
         if not isinstance(r, dict):
             return True
-        if r.get("phase") != "en_ligne":
+        if r.get("phase") == "arret":
             return False
-        dernier = r.get("dernier_envoi")
-        if isinstance(dernier, (int, float)) and not isinstance(dernier, bool):
-            return self.maintenant() - dernier < INACTIVITE_AVANT_MAJ
+
+        def instant(valeur):
+            return valeur if isinstance(valeur, (int, float)) and not isinstance(valeur, bool) else None
+
+        repere = instant(r.get("dernier_envoi"))
+        if repere is None:
+            repere = instant(r.get("phase_depuis"))
+        if repere is not None:
+            return self.maintenant() - repere < INACTIVITE_AVANT_MAJ
         return True
 
     def _relance_possible(self) -> bool:
@@ -489,7 +505,7 @@ class Majeur:
             if self._manifeste is None:
                 return self.etat()
             if self.relais_occupe():
-                self._etat["message"] = "Mise à jour reportée : le relais transmet en ce moment."
+                self._etat["message"] = "Mise à jour reportée : le relais transmet en ce moment ou se reconnecte."
                 return self.etat()
             if not self._relance_possible():
                 self._etat["message"] = "Mise à jour possible seulement quand AME Tech est lancé par AME Tech.exe."

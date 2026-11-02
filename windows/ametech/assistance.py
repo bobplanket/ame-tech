@@ -50,11 +50,14 @@ TEAMVIEWER_URL = "https://www.teamviewer.com/fr/telechargement/windows/"
 DELAI_TELECHARGEMENT_S = 30  # délai réseau par opération (connexion, lecture)
 DELAI_ID_S = 30  # attente maximale de l'identifiant après le lancement
 DELAI_GET_ID_S = 10  # délai d'un appel `--get-id`
+CACHE_PROCESSUS_S = 10  # /api/etat est lu chaque seconde : tasklist au plus une fois par 10 s
 
 _INTERDITS_NOM = set('<>:"/\\|?*,') | {chr(c) for c in range(32)}
 _RE_ID = re.compile(r"^\d{6,12}$")
 _verrou = threading.Lock()
 _EST_WINDOWS = sys.platform == "win32"
+_cache_processus: tuple[float, bool] | None = None  # (instant monotonic, rustdesk.exe en cours)
+_verrou_cache = threading.Lock()
 
 
 class ErreurAssistance(Exception):
@@ -171,10 +174,30 @@ def _executable_valide(chemin: Path, verifier_empreinte: bool) -> bool:
     return not verifier_empreinte or sha256_fichier(chemin) == SHA256_RUSTDESK
 
 
+def _oublier_cache_processus() -> None:
+    global _cache_processus
+    with _verrou_cache:
+        _cache_processus = None
+
+
 def _rustdesk_en_cours() -> bool:
-    """Vrai si un processus rustdesk.exe tourne (le paquet portable lance rustdesk.exe)."""
+    """Vrai si un processus rustdesk.exe tourne, résultat gardé CACHE_PROCESSUS_S secondes."""
+    global _cache_processus
     if not _EST_WINDOWS:
         return False
+    with _verrou_cache:
+        cache = _cache_processus
+    maintenant = time.monotonic()
+    if cache is not None and 0 <= maintenant - cache[0] < CACHE_PROCESSUS_S:
+        return cache[1]
+    valeur = _tasklist_rustdesk()
+    with _verrou_cache:
+        _cache_processus = (maintenant, valeur)
+    return valeur
+
+
+def _tasklist_rustdesk() -> bool:
+    """Interroge tasklist (le paquet portable lance rustdesk.exe)."""
     try:
         sortie = subprocess.run(
             ["tasklist", "/FI", "IMAGENAME eq rustdesk.exe", "/FO", "CSV", "/NH"],
@@ -271,6 +294,7 @@ def lancer_rustdesk() -> dict:
             _lancer_processus(chemin)
         except OSError as e:
             raise ErreurAssistance(f"Impossible de lancer RustDesk : {e}") from e
+        _oublier_cache_processus()  # l'état passe à « lancé » sans attendre la fin du cache
         _log("info", "RustDesk lancé", serveur=SERVEUR)
         identifiant = _attendre_id(chemin)
         if identifiant:

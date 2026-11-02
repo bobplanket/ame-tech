@@ -22,6 +22,7 @@ DEFAUTS = {
     "mode": "auto",
     "demarrage_windows": False,
     "relais_au_lancement": False,
+    "relais_apres_maj": False,  # le relais tournait avant une relance de mise à jour : le redémarrer
     "canal_maj": "stable",
 }
 _verrou = threading.RLock()

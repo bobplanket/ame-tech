@@ -11,10 +11,17 @@ dont la source n'a pas donné signe de vie depuis 8 s devient « rien ».
 
 Mode Auto / Manuel : c'est la source du serveur (`presenter` ou `manual`).
 En Manuel le relais garde sa session et envoie des trames vides. Un choix fait
-dans le logiciel est poussé au serveur ; un choix fait ailleurs (régie,
-panneau OBS) remonte par la réponse des trames.
+dans le logiciel est poussé au serveur (au démarrage du relais s'il a été fait
+relais arrêté) ; un choix fait ailleurs (régie, panneau OBS) remonte par la
+réponse des trames.
+
+Protection de l'adresse IP de l'église : le serveur la bloque après 8 codes
+refusés en 15 min, régie comprise. Après 2 refus consécutifs du code, plus
+aucun login jusqu'à un nouvel enrôlement ou un redémarrage manuel du relais ;
+après un 429, aucun login pendant 15 min.
 """
 from __future__ import annotations
+import math
 import random
 import socket
 import threading
@@ -37,7 +44,10 @@ class Relais:
     FRAICHEUR_S = 8.0           # texte périmé si ProPresenter se tait plus longtemps
     TOLERANCE_HORLOGE_S = 20.0
     ATTENTE_CODE_REFUSE = 35.0  # attendre le code suivant, sans épuiser les essais autorisés
-    ATTENTE_BLOQUE = 300.0
+    REFUS_MAX = 2               # refus consécutifs du code avant d'arrêter tout essai
+    ATTENTE_BLOQUE = 900.0      # après un 429 : le serveur bloque l'adresse IP 15 min
+    CALME_S = 60.0              # renouveler la session seulement si aucun texte depuis 1 min
+    MESSAGE_REENROLER = "Code refusé deux fois : réenrôlez ce poste (code fourni par l'administrateur)"
     ATTENTE_OCCUPE = 12.0
     INTERVALLE_HORLOGE = 120.0
 
@@ -56,7 +66,11 @@ class Relais:
         self.client_id = reg.get("client_id") or "ametech"
         self.mode = reg.get("mode", "auto")
         self._mode_a_pousser: str | None = None
+        self._mode_choisi_arrete: str | None = None  # choix fait relais arrêté, poussé au démarrage
         self.actif = False
+        # essais de login
+        self._refus = 0                # refus consécutifs du code
+        self._login_pas_avant = 0.0    # monotonic : aucun login avant (après un 429)
         # source
         self._contenu = Contenu()
         self._source_vue = 0.0
@@ -108,7 +122,7 @@ class Relais:
         with self._verrou:
             c = self._clients.get(url)
             if c is None:
-                c = self._clients[url] = cible_mod.Cible(url, self._secret)
+                c = self._clients[url] = cible_mod.Cible(url, self._secret, garde=self)
                 if self._ecart is not None:
                     c.ecart_s = self._ecart
             return c
@@ -123,7 +137,8 @@ class Relais:
             gen = self._generation
             self.actif = True
             self._erreur_fatale = self._erreur_cible = self._erreur_pp = ""
-            self._mode_a_pousser = None
+            self._mode_a_pousser, self._mode_choisi_arrete = self._mode_choisi_arrete, None
+            self._refus = 0  # redémarrage manuel : un nouvel essai de code est permis
             self._idx, self._bascule_t = 0, 0.0
             self._fils = [threading.Thread(target=self._boucle_source, args=(self._arret, gen), name="ametech-source", daemon=True),
                           threading.Thread(target=self._boucle_cible, args=(self._arret, gen), name="ametech-cible", daemon=True)]
@@ -165,6 +180,8 @@ class Relais:
             self.mode = mode
             if self.actif:
                 self._mode_a_pousser = mode
+            else:
+                self._mode_choisi_arrete = mode
         try:
             self._ecrire({"mode": mode})
         except Exception as exc:
@@ -339,6 +356,58 @@ class Relais:
         t = time.time() + (self._ecart or 0.0)
         return {"code": totp.code(secret, t), "reste_s": int(totp.PAS - (t % totp.PAS)) or totp.PAS}
 
+    # ------------------------------------------------------------ garde des logins
+    def autoriser_login(self) -> None:
+        """Appelé par Cible.login avant tout envoi de code. Lève ErreurCible pour l'empêcher."""
+        with self._verrou:
+            refus, reste = self._refus, self._login_pas_avant - time.monotonic()
+        if refus >= self.REFUS_MAX:
+            raise ErreurCible(self.MESSAGE_REENROLER, 401, "reenroler")
+        if reste > 0:
+            raise ErreurCible("Trop d'essais de code : le serveur bloque, nouvel essai dans %d min" % math.ceil(reste / 60), 429, "bloque")
+
+    def noter_login(self, statut: int) -> None:
+        """Réponse de chaque POST /api/login, quel que soit l'appelant (boucle, diagnostic)."""
+        with self._verrou:
+            if statut == 200:
+                self._refus = 0
+                return
+            if statut == 429:
+                self._login_pas_avant = time.monotonic() + self.ATTENTE_BLOQUE
+                return
+            if statut != 401:
+                return
+            self._refus += 1
+            bloque = self._refus == self.REFUS_MAX
+        if bloque:
+            journal.log("erreur", "connexion", self.MESSAGE_REENROLER + " ; plus aucun essai de code pour ne pas faire bloquer l'adresse de l'église")
+
+    def _login_suspendu(self) -> str:
+        """Raison de ne pas tenter de login hors de la boucle (diagnostic), ou chaîne vide."""
+        with self._verrou:
+            refus, reste = self._refus, self._login_pas_avant - time.monotonic()
+        if refus >= self.REFUS_MAX:
+            return self.MESSAGE_REENROLER
+        if reste > 0:
+            return "Trop d'essais de code : le serveur bloque, nouvel essai dans %d min" % math.ceil(reste / 60)
+        if refus:
+            return "Code refusé par le serveur : le relais retente une fois au code suivant, le diagnostic n'envoie pas de code de plus"
+        return ""
+
+    def _calme(self) -> bool:
+        """Aucun texte transmis depuis au moins CALME_S."""
+        with self._verrou:
+            return self._dernier_envoi is None or time.time() - self._dernier_envoi >= self.CALME_S
+
+    def _renouveler(self, c: cible_mod.Cible) -> None:
+        try:
+            c.renouveler()
+        except ErreurCible as exc:
+            journal.log("alerte", "connexion", "Renouvellement de session reporté sur " + c.url + " : " + str(exc))
+            return
+        self._stats["logins"] += 1
+        journal.log("info", "connexion", "Session renouvelée avant son expiration sur " + c.url)
+
     # ------------------------------------------------------------ cible
     def _contenu_a_envoyer(self) -> Contenu:
         with self._verrou:
@@ -376,6 +445,15 @@ class Relais:
             if not self._secret():
                 self._erreur_fatale = "Poste non enrôlé : coller le code d'enrôlement donné par l'admin"
                 self._connectee = False
+                self._maj_phase()
+                arret.wait(2)
+                continue
+            with self._verrou:
+                refus = self._refus
+            if refus >= self.REFUS_MAX and not c.connecte():
+                # Plus aucun essai de code : un vieux secret entretiendrait le blocage de l'IP de l'église.
+                session = None
+                self._erreur_fatale, self._connectee = self.MESSAGE_REENROLER, False
                 self._maj_phase()
                 arret.wait(2)
                 continue
@@ -424,6 +502,9 @@ class Relais:
                     journal.log("info", "mode", "Serveur passé en " + ("Auto (ProPresenter)" if pousser == "auto" else "Manuel (régie)"))
                 if arret.is_set() or gen != self._generation:
                     break
+                if c.renouvellement_du(self._calme()):
+                    etape = "POST /api/login (renouvellement)"
+                    self._renouveler(c)
                 contenu = self._contenu_a_envoyer()
                 sequence += 1
                 etape = "POST /api/presenter/frame"
@@ -474,17 +555,20 @@ class Relais:
                 elif raison == "non_enrole":
                     self._erreur_fatale = str(exc)
                     attente = 2
-                elif raison == "code_refuse":
-                    self._erreur_fatale = str(exc)
+                elif raison in ("code_refuse", "reenroler"):
                     journal.log("erreur", "connexion", message)
                     c.oublier_session()
                     c.ecart_s = None  # remesurer l'horloge avant le prochain essai
-                    session, attente = None, self.ATTENTE_CODE_REFUSE
-                    echecs += 1
+                    with self._verrou:
+                        definitif = self._refus >= self.REFUS_MAX
+                    self._erreur_fatale = self.MESSAGE_REENROLER if definitif else str(exc)
+                    session, attente = None, (0.2 if definitif else self.ATTENTE_CODE_REFUSE)
                 elif raison == "bloque":
                     self._erreur_fatale = str(exc)
                     journal.log("erreur", "connexion", message)
-                    session, attente = None, self.ATTENTE_BLOQUE
+                    with self._verrou:
+                        reste = self._login_pas_avant - time.monotonic()
+                    session, attente = None, (reste if reste > 0 else self.ATTENTE_BLOQUE)
                 else:
                     self._erreur_fatale = ""
                     journal.log("alerte", "connexion", message)
@@ -536,9 +620,11 @@ class Relais:
             self._message = message
 
     def oublier_sessions(self) -> None:
-        """Après un enrôlement ou un oubli : les cookies ouverts avec l'ancien secret sont abandonnés."""
+        """Après un enrôlement ou un oubli : les cookies ouverts avec l'ancien secret sont abandonnés,
+        et les essais de code reprennent avec le nouveau secret."""
         with self._verrou:
             clients = list(self._clients.values())
+            self._refus = 0
         for c in clients:
             c.oublier_session()
         self._reveil.set()
@@ -609,10 +695,13 @@ class Relais:
             noter("serveur", False, "GET /api/session sur " + url + " : " + str(exc))
         if not self._secret():
             noter("session", False, "Poste non enrôlé : coller le code d'enrôlement")
+        elif c.connecte():
+            noter("session", True, "Session ouverte par le code du moment (cookie valable)")
+        elif self._login_suspendu():
+            noter("session", False, "Pas d'essai de code : " + self._login_suspendu())
         else:
             try:
-                if not c.connecte():
-                    c.login()
+                c.login()
                 noter("session", True, "POST /api/login : session ouverte par le code du moment")
             except ErreurCible as exc:
                 noter("session", False, "POST /api/login : " + str(exc))

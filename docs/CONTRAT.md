@@ -12,7 +12,7 @@ Python 3.13 stdlib uniquement côté Windows (runtime embarqué, pas de pip). Te
 
 | Chemin | Propriétaire |
 |---|---|
-| `windows/ametech/__init__.py`, `version.py` (`VERSION = "3.0.0"`), `totp.py`, `propresenter.py`, `cible.py`, `relais.py`, `journal.py`, `coffre.py`, `ui_server.py`, `__main__.py`, `tests/test_relais*.py`, `tests/faux_propresenter.py` | Agent **relais** |
+| `windows/ametech/__init__.py`, `version.py` (`VERSION = "3.0.1"`), `totp.py`, `propresenter.py`, `cible.py`, `relais.py`, `journal.py`, `coffre.py`, `ui_server.py`, `__main__.py`, `tests/test_relais*.py`, `tests/faux_propresenter.py` | Agent **relais** |
 | `windows/ametech/www/` (index.html, app.css, app.js, assets/) et `windows/outils/maquette_api.py` (faux serveur local pour développer l'UI) | Agent **interface** |
 | `windows/ametech/maj.py`, `windows/ametech/ed25519.py`, `windows/ametech/demarrage.py`, `windows/ametech/cle_publique.txt`, `windows/runtime/`, `windows/build_zip.py`, `.github/workflows/`, `outils/signer_manifeste.py`, `outils/generer_cles.py`, `tests/test_maj*.py` | Agent **paquet** |
 | `windows/ametech/assistance.py`, `tests/test_assistance.py`, `docs/RUSTDESK.md` | Agent **assistance** |
@@ -27,7 +27,7 @@ Tous les modules s'importent par `from ametech import x`. Le point d'entrée est
 
 ### `coffre.py` (relais)
 - `lire() -> dict` / `ecrire(d: dict) -> None` : réglages persistants dans `%APPDATA%\AME Tech\reglages.json`. Les champs secrets (`secret_totp`) sont chiffrés DPAPI (`CryptProtectData`, voir `protect()` de `connecteur_v2.py`) ; hors Windows (tests, Mac) chiffrement absent mais fichier en 600.
-- Clés connues : `secret_totp` (base32), `cibles` (liste d'URL, défaut `["https://tech.ame.paris"]`), `port_pp` (int, 0 = auto), `mode` (`"auto"|"manuel"`), `demarrage_windows` (bool), `relais_au_lancement` (bool), `canal_maj` (`"stable"`).
+- Clés connues : `secret_totp` (base32), `cibles` (liste d'URL, défaut `["https://tech.ame.paris"]`), `port_pp` (int, 0 = auto), `mode` (`"auto"|"manuel"`), `demarrage_windows` (bool), `relais_au_lancement` (bool), `relais_apres_maj` (bool, interne : posé par l'arrêt pour relance quand le relais tournait, effacé après son redémarrage), `canal_maj` (`"stable"`).
 
 ### `totp.py` (relais)
 Copie conforme de `~/clawd/badaboum/badaboum-live-v2/totp.py` (mêmes fonctions : `code`, `verifier`, `lire_enrolement`, ...).
@@ -39,7 +39,9 @@ Copie conforme de `~/clawd/badaboum/badaboum-live-v2/totp.py` (mêmes fonctions 
 ### `relais.py` (relais)
 - `class Relais` : `demarrer()`, `arreter()`, `etat() -> dict`, `definir_mode(mode: str)`, `diagnostic() -> dict`.
 - Détection auto du processus et du port ProPresenter (reprendre `windows_ports()` / `discover()`), reconnexion progressive, bail serveur, aucune file de vieux textes, redondance : essaie les `cibles` dans l'ordre, bascule sur la suivante après 3 échecs consécutifs, revient à la première toutes les 5 min.
-- Auth cible : login TOTP (`cible.py`) puis cookie ; nouveau login avec le code du moment à l'expiration ou sur 401.
+- Auth cible : login TOTP (`cible.py`) puis cookie ; renouvellement anticipé avec le code du moment (dès 11 h si aucun texte depuis 1 min, au plus tard à 11 h 30), nouveau login sur 401.
+- Protection de l'adresse IP de l'église (le serveur la bloque après 8 codes refusés en 15 min) : après 2 refus consécutifs du code, plus aucun login, phase `erreur` « Code refusé deux fois : réenrôlez ce poste (code fourni par l'administrateur) », jusqu'à un nouvel enrôlement ou un redémarrage manuel du relais ; après un 429, aucun login pendant 15 min ; `diagnostic()` n'envoie pas de code pendant un refus.
+- Mode choisi relais arrêté : poussé au serveur au démarrage du relais.
 
 ### `ui_server.py` (relais) : API locale consommée par l'interface
 
@@ -68,7 +70,7 @@ Toutes les réponses sont JSON, `Cache-Control: no-store`.
 
 ### `maj.py` (paquet)
 - `etat() -> {"version_locale", "version_dispo": str|None, "statut": "a_jour|disponible|telechargement|pret|erreur|inconnu", "message", "verifie_le": float|None}`
-- `verifier() -> dict` (même forme) ; `appliquer() -> dict` ; `boucle(relais) -> None` (thread : vérifie au lancement puis toutes les 6 h ; applique seulement si `relais.etat()["relais"]["phase"] != "en_ligne"` ou si rien n'est transmis depuis 10 min).
+- `verifier() -> dict` (même forme) ; `appliquer() -> dict` ; `boucle(relais) -> None` (thread : vérifie au lancement puis toutes les 6 h ; applique seulement si `relais.etat()["relais"]["phase"] == "arret"` ou si rien n'est transmis depuis 10 min : dernier `dernier_envoi`, à défaut `phase_depuis`). Le relais qui tournait repart après la relance (code de sortie 75, garanti par `__main__`).
 - Source : `https://github.com/bobplanket/ame-tech/releases/latest/download/manifest.json` + `manifest.json.sig`, repli `https://tech.ame.paris/maj/manifest.json` (+ `.sig`).
 - Manifeste : `{"version": "3.0.1", "date": "...", "notes": "...", "fichiers": [{"chemin": "ametech/relais.py", "sha256": "...", "url": "..."}], "zip": {"url": ".../AME-Tech-Windows.zip", "sha256": "..."}}`. Signature Ed25519 détachée (64 octets, base64) du fichier `manifest.json` tel quel ; clé publique dans `cle_publique.txt` (base64 32 octets). Refus total si la signature, une empreinte ou la version (strictement supérieure) ne colle pas.
 - Application : télécharge le ZIP, vérifie, extrait dans `%LOCALAPPDATA%\AME Tech\versions\<version>\`, bascule le pointeur `courante.txt`, relance ; si la nouvelle version ne répond pas sur `/api/etat` en 30 s, retour à la précédente.
@@ -88,4 +90,4 @@ Une seule page `www/index.html` + `app.css` + `app.js`, sans framework ni CDN (t
 
 ## OBS (agent obs)
 
-Script Lua `obs/ame-tech.lua` (OBS 30+, Mac et Windows, `obslua`). Réglages du script : URL du site (défaut `https://tech.ame.paris`), lien Habillage (collé depuis la page Sources OBS du site, contient le jeton de lecture : stocké dans les réglages OBS, jamais dans le script). Fonctions : créer la scène « Habillage » et sa source navigateur (1920×1080, `shutdown=false`, `restart_when_active=false`, `reroute_audio=true`) ; bouton et raccourci « Rafraîchir l'habillage » (vide le cache de toutes les sources navigateur dont l'URL commence par l'URL du site : `obs_properties_get` + `obs_property_button_clicked` sur `refreshnocache`) ; rafraîchissement auto quand `GET <site>/api/version` change (sondage toutes les 30 s via la source navigateur cachée ou `os.execute curl` ; seulement si `GET <site>/api/etat?view=<jeton>` montre que rien n'est à l'antenne : `lt, verset, chant, carton, bandeau, don, donner, media, plein` tous `on=false`) ; raccourcis : tout masquer, logo, bandeau, bascule Auto / Manuel (ces actions d'écriture passent par le panneau dock, pas par le script, car le script n'a pas de code d'écriture). Le script affiche l'adresse du panneau à ajouter en dock : `<site>/panneau.html`.
+Script Lua `obs/ame-tech.lua` (OBS 30+, Mac et Windows, `obslua`). Réglages du script : URL du site (défaut `https://tech.ame.paris` ; `http://` refusé hors `localhost` et `127.0.0.1`, avec un message dans l'état du script, car le jeton de lecture partirait en clair), lien Habillage (collé depuis la page Sources OBS du site, contient le jeton de lecture : stocké dans les réglages OBS, jamais dans le script). Fonctions : créer la scène « Habillage » et sa source navigateur (1920×1080, `shutdown=false`, `restart_when_active=false`, `reroute_audio=true`) ; bouton et raccourci « Rafraîchir l'habillage » (vide le cache de toutes les sources navigateur dont l'URL commence par l'URL du site : `obs_properties_get` + `obs_property_button_clicked` sur `refreshnocache`) ; rafraîchissement auto quand `GET <site>/api/version` change (sondage toutes les 30 s via la source navigateur cachée ou `os.execute curl` ; seulement si `GET <site>/api/etat?view=<jeton>` montre que rien n'est à l'antenne : `lt, verset, chant, carton, bandeau, don, donner, whatsapp, media, plein` tous `on=false`, une section absente comptant comme allumée) ; raccourcis : tout masquer, logo, bandeau, bascule Auto / Manuel (ces actions d'écriture passent par le panneau dock, pas par le script, car le script n'a pas de code d'écriture). Le script affiche l'adresse du panneau à ajouter en dock : `<site>/panneau.html`.

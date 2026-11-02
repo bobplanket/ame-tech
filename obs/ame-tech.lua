@@ -23,19 +23,20 @@ continuent de marcher.
 
 obs = obslua
 
-local VERSION_SCRIPT = "1.0.0"
+local VERSION_SCRIPT = "1.0.1"
 local SITE_DEFAUT = "https://tech.ame.paris"
 local NOM_SCENE = "Habillage"
 local NOM_SOURCE = "Habillage AME"
 local SONDAGE_S = 30
 local DELAI_MAX_S = 20
 local TAILLE_MAX = 512 * 1024
-local CLES_ANTENNE = { "lt", "verset", "chant", "carton", "bandeau", "don", "donner", "media", "plein" }
+local CLES_ANTENNE = { "lt", "verset", "chant", "carton", "bandeau", "don", "donner", "whatsapp", "media", "plein" }
 
 local site = SITE_DEFAUT
 local lien = ""
 local jeton = nil
 local probleme_lien = nil
+local probleme_site = nil
 local mes_reglages = nil
 local raccourci = nil
 local etat_texte = "Démarrage…"
@@ -296,6 +297,20 @@ local function nettoyer_site(valeur)
   return s
 end
 
+-- http:// seulement sur ce poste : ailleurs, le jeton de lecture partirait en clair sur le réseau.
+local function verifier_site(s)
+  if not s:find("^http://") then return nil end
+  local hote = s:match("^http://([^/?#]*)") or ""
+  hote = hote:gsub(":%d+$", ""):lower()
+  if hote == "localhost" or hote == "127.0.0.1" then return nil end
+  return "Adresse du site en http:// refusée : le jeton de lecture partirait en clair. Utilisez https:// " ..
+    "(http:// est accepté seulement pour localhost et 127.0.0.1)."
+end
+
+local function probleme()
+  return probleme_site or probleme_lien
+end
+
 local function commence_par_site(url)
   if type(url) ~= "string" or #url < #site then return false end
   if url:sub(1, #site):lower() ~= site:lower() then return false end
@@ -449,6 +464,7 @@ local function rien_a_l_antenne(etat)
 end
 
 local function verifier_antenne()
+  if probleme_site then return end
   if not jeton then
     definir_etat("Nouvelle version " .. version_attendue .. " publiée : lien Habillage manquant, rafraîchissez à la main.", true)
     return
@@ -503,6 +519,7 @@ local function tic()
   end
   if not http.dispo then return end
   if http.en_cours then http.pomper() return end
+  if probleme_site then return end
   if maintenant >= prochain_sondage then
     prochain_sondage = maintenant + SONDAGE_S
     sonder()
@@ -512,12 +529,13 @@ end
 ------------------------------------------------------------------ interface du script
 local function maj_infos(settings)
   obs.obs_data_set_string(settings, "adresse_panneau", adresse_panneau())
-  obs.obs_data_set_string(settings, "etat_script", probleme_lien or etat_texte)
+  obs.obs_data_set_string(settings, "etat_script", probleme() or etat_texte)
 end
 
 local function lire_reglages(settings)
   local ancien_site = site
   site = nettoyer_site(obs.obs_data_get_string(settings, "site"))
+  probleme_site = verifier_site(site)
   lien, jeton, probleme_lien = analyser_lien(obs.obs_data_get_string(settings, "lien_habillage"))
   if site ~= ancien_site then
     version_vue, version_attendue, prochain_sondage = nil, nil, 0
@@ -545,7 +563,7 @@ function script_properties()
   local props = obs.obs_properties_create()
 
   local p_site = obs.obs_properties_add_text(props, "site", "Adresse du site", obs.OBS_TEXT_DEFAULT)
-  obs.obs_property_set_long_description(p_site, "Par défaut " .. SITE_DEFAUT .. ". Sert aussi à reconnaître les sources navigateur à rafraîchir.")
+  obs.obs_property_set_long_description(p_site, "Par défaut " .. SITE_DEFAUT .. ". Sert aussi à reconnaître les sources navigateur à rafraîchir. https:// obligatoire, sauf localhost et 127.0.0.1.")
   local p_lien = obs.obs_properties_add_text(props, "lien_habillage", "Lien Habillage", obs.OBS_TEXT_PASSWORD)
   obs.obs_property_set_long_description(p_lien, "Copiez le lien « Habillage » sur la page Sources OBS du site et collez-le ici. Il contient un jeton de lecture, gardé dans les réglages d'OBS de ce poste.")
 
@@ -563,13 +581,13 @@ function script_properties()
   local p_panneau = obs.obs_properties_add_text(props, "adresse_panneau", "Panneau (dock)", obs.OBS_TEXT_INFO)
   obs.obs_property_set_long_description(p_panneau, "Dans OBS : Docks > Docks de navigateur personnalisés, nom « AME Panneau », collez cette adresse, puis connectez-vous avec le code à 6 chiffres.")
   local p_etat = obs.obs_properties_add_text(props, "etat_script", "État", obs.OBS_TEXT_INFO)
-  if probleme_lien or etat_alerte then obs.obs_property_text_set_info_type(p_etat, obs.OBS_TEXT_INFO_WARNING) end
+  if probleme() or etat_alerte then obs.obs_property_text_set_info_type(p_etat, obs.OBS_TEXT_INFO_WARNING) end
 
   local function modifie(proprietes, _, settings)
     lire_reglages(settings)
     local info = obs.obs_properties_get(proprietes, "etat_script")
     if info ~= nil then
-      obs.obs_property_text_set_info_type(info, (probleme_lien or etat_alerte) and obs.OBS_TEXT_INFO_WARNING or obs.OBS_TEXT_INFO_NORMAL)
+      obs.obs_property_text_set_info_type(info, (probleme() or etat_alerte) and obs.OBS_TEXT_INFO_WARNING or obs.OBS_TEXT_INFO_NORMAL)
     end
     return true
   end
@@ -612,7 +630,7 @@ function script_unload()
 end
 
 -- Accès réservé aux essais hors OBS (tests/), sans effet dans OBS.
-AMETECH_INTERNE = { json = json, http = http, analyser_lien = analyser_lien, nettoyer_site = nettoyer_site,
+AMETECH_INTERNE = { json = json, http = http, analyser_lien = analyser_lien, nettoyer_site = nettoyer_site, verifier_site = verifier_site,
   rien_a_l_antenne = rien_a_l_antenne, tic = tic, rafraichir = rafraichir, creer_scene = creer_scene,
   etat = function() return { texte = etat_texte, alerte = etat_alerte, version_vue = version_vue, version_attendue = version_attendue, site = site, jeton_present = jeton ~= nil } end,
   forcer_sondage = function() prochain_sondage = 0 end }

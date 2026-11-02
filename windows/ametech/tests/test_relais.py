@@ -414,6 +414,344 @@ class TestBoutEnBout(unittest.TestCase):
         self.assertIn("Code refusé", r.etat()["relais"]["message"])
 
 
+# ---------------------------------------------------------------- serveur cible simulé
+
+class FausseCible:
+    """Serveur cible minimal : compte les logins, statut de login réglable (200, 401, 429)."""
+
+    def __init__(self):
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        import threading
+        self.verrou = threading.Lock()
+        self.statut_login = 200
+        self.logins = 0
+        self.claims = 0
+        self.trames: list[dict] = []
+        self.etats: list[dict] = []
+        self.source = "presenter"
+        cible = self
+
+        class Gestion(BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def repondre(self, statut, corps, entetes=None):
+                brut = json.dumps(corps).encode()
+                self.send_response(statut)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(brut)))
+                for k, v in (entetes or {}).items():
+                    self.send_header(k, v)
+                self.end_headers()
+                self.wfile.write(brut)
+
+            def do_GET(self):
+                if self.path == "/api/heure":
+                    return self.repondre(200, {"t": time.time()})
+                if self.path == "/api/session":
+                    return self.repondre(200, {"pin_requis": False, "mode": "totp"})
+                return self.repondre(404, {"erreur": "route"})
+
+            def do_POST(self):
+                longueur = int(self.headers.get("Content-Length") or 0)
+                corps = json.loads(self.rfile.read(longueur) or b"{}")
+                with cible.verrou:
+                    if self.path == "/api/login":
+                        cible.logins += 1
+                        statut, n = cible.statut_login, cible.logins
+                        if statut == 200:
+                            return self.repondre(200, {"ok": True}, {"Set-Cookie": "badaboum_session=c%d; Path=/; HttpOnly; Max-Age=43200" % n})
+                        return self.repondre(statut, {"erreur": "Code incorrect"})
+                    if "badaboum_session=" not in (self.headers.get("Cookie") or ""):
+                        return self.repondre(401, {"erreur": "authentification"})
+                    if self.path == "/api/presenter/claim":
+                        cible.claims += 1
+                        return self.repondre(200, {"session": "s%d" % cible.claims, "server_time": time.time()})
+                    if self.path == "/api/presenter/frame":
+                        cible.trames.append(corps)
+                        return self.repondre(200, {"ok": True, "source": cible.source})
+                    if self.path == "/api/etat":
+                        cible.etats.append(corps)
+                        if corps.get("source") in ("presenter", "manual"):
+                            cible.source = corps["source"]
+                        return self.repondre(200, {})
+                return self.repondre(404, {"erreur": "route"})
+
+        self.serveur = ThreadingHTTPServer(("127.0.0.1", 0), Gestion)
+        self.serveur.daemon_threads = True
+        self.url = "http://127.0.0.1:" + str(self.serveur.server_address[1])
+        threading.Thread(target=self.serveur.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True).start()
+
+    def nb_logins(self) -> int:
+        with self.verrou:
+            return self.logins
+
+    def fermer(self):
+        self.serveur.shutdown()
+        self.serveur.server_close()
+
+
+class TestRelaisCibleSimulee(unittest.TestCase):
+    """Comportements du relais face au serveur : refus du code, blocage 429, renouvellement, mode."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.faux = FauxProPresenter()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.faux.fermer()
+
+    def setUp(self):
+        self.cible = FausseCible()
+        self.addCleanup(self.cible.fermer)
+        self.faux.eteindre()
+        reinitialiser_coffre(secret_totp=totp.nouveau_secret(), cibles=[self.cible.url], port_pp=self.faux.port)
+        self.relais = Relais()
+        self.relais.DELAI_MAX = 0.5
+        self.relais.BATTEMENT_S = 0.2
+        self.addCleanup(self.relais.arreter)
+
+    def client(self):
+        return self.relais._client(self.cible.url)
+
+    def vieillir_session(self, secondes):
+        c = self.client()
+        with c._verrou:
+            c._ouvert -= secondes
+            c._expire -= secondes
+        self.relais._reveil.set()
+
+    # --- point 1 : un vieux secret ne doit pas entretenir le blocage de l'adresse IP
+    def test_deux_refus_du_code_arretent_les_essais(self):
+        self.cible.statut_login = 401
+        self.relais.ATTENTE_CODE_REFUSE = 0.2
+        self.relais.demarrer()
+        attendre(lambda: "deux fois" in self.relais.etat()["relais"]["message"], 10, message="pas d'arrêt après deux refus")
+        etat = self.relais.etat()["relais"]
+        self.assertEqual(etat["phase"], "erreur")
+        self.assertEqual(etat["message"], "Code refusé deux fois : réenrôlez ce poste (code fourni par l'administrateur)")
+        time.sleep(1.5)
+        self.assertEqual(self.cible.nb_logins(), 2)
+        d = self.relais.diagnostic()
+        session = [e for e in d["etapes"] if e["nom"] == "session"][0]
+        self.assertFalse(session["ok"])
+        self.assertIn("réenrôlez", session["detail"])
+        self.assertEqual(self.cible.nb_logins(), 2)  # le diagnostic n'a pas consommé d'essai
+        # Nouvel enrôlement : les essais reprennent.
+        self.cible.statut_login = 200
+        coffre.ecrire({"secret_totp": totp.nouveau_secret()})
+        self.relais.oublier_sessions()
+        attendre(lambda: self.relais.etat()["relais"]["cible"]["connectee"], 10, message="pas de reprise après réenrôlement")
+
+    def test_redemarrage_manuel_relance_les_essais(self):
+        self.cible.statut_login = 401
+        self.relais.ATTENTE_CODE_REFUSE = 0.2
+        self.relais.demarrer()
+        attendre(lambda: "deux fois" in self.relais.etat()["relais"]["message"], 10)
+        self.relais.arreter()
+        self.cible.statut_login = 200
+        self.relais.demarrer()
+        attendre(lambda: self.relais.etat()["relais"]["cible"]["connectee"], 10, message="pas de reprise après redémarrage")
+
+    def test_diagnostic_sans_essai_pendant_un_refus(self):
+        self.cible.statut_login = 401
+        self.relais.ATTENTE_CODE_REFUSE = 60
+        self.relais.demarrer()
+        attendre(lambda: self.cible.nb_logins() == 1 and self.relais.etat()["relais"]["phase"] == "erreur", 10)
+        d = self.relais.diagnostic()
+        session = [e for e in d["etapes"] if e["nom"] == "session"][0]
+        self.assertFalse(session["ok"])
+        self.assertEqual(self.cible.nb_logins(), 1)
+
+    def test_pas_de_login_pendant_15_min_apres_un_429(self):
+        self.assertGreaterEqual(Relais.ATTENTE_BLOQUE, 900)
+        self.cible.statut_login = 429
+        self.relais.demarrer()
+        attendre(lambda: self.cible.nb_logins() == 1 and self.relais.etat()["relais"]["phase"] == "erreur", 10)
+        d = self.relais.diagnostic()
+        self.assertFalse([e for e in d["etapes"] if e["nom"] == "session"][0]["ok"])
+        # Même un redémarrage manuel n'envoie pas de code avant la fin du blocage.
+        self.relais.arreter()
+        self.relais.demarrer()
+        time.sleep(1.0)
+        self.assertEqual(self.cible.nb_logins(), 1)
+
+    # --- point 2 : renouvellement anticipé du cookie
+    def test_cible_renouvellement_du(self):
+        from ametech import cible as cible_mod
+        c = cible_mod.Cible(self.cible.url, lambda: totp.nouveau_secret())
+        self.assertFalse(c.renouvellement_du(True))  # pas de session
+        c.login()
+        self.assertFalse(c.renouvellement_du(True))
+        with c._verrou:
+            c._ouvert -= 11 * 3600 + 1
+            c._expire -= 11 * 3600 + 1
+        self.assertTrue(c.connecte())
+        self.assertTrue(c.renouvellement_du(True))
+        self.assertFalse(c.renouvellement_du(False))  # un texte passe : on attend
+        with c._verrou:
+            c._ouvert -= 31 * 60
+            c._expire -= 31 * 60
+        self.assertTrue(c.renouvellement_du(False))  # 30 min avant l'expiration : on renouvelle quand même
+
+    def test_renouvellement_anticipe_au_calme(self):
+        self.relais.demarrer()
+        attendre(lambda: self.relais.etat()["relais"]["cible"]["connectee"], 10)
+        self.assertEqual(self.cible.nb_logins(), 1)
+        self.vieillir_session(11 * 3600 + 1)
+        attendre(lambda: self.cible.nb_logins() == 2, 5, message="pas de renouvellement à 11 h")
+        self.assertEqual(self.cible.claims, 1)  # la session du relais n'est pas coupée
+        self.assertTrue(self.relais.etat()["relais"]["cible"]["connectee"])
+        time.sleep(0.6)
+        self.assertEqual(self.cible.nb_logins(), 2)  # un seul renouvellement
+
+    def test_pas_de_renouvellement_pendant_un_passage(self):
+        self.relais.demarrer()
+        self.faux.changer("Texte à l'antenne")
+        attendre(lambda: self.relais.etat()["relais"]["dernier_envoi"], 10, message="texte non transmis")
+        self.vieillir_session(11 * 3600 + 1)
+        time.sleep(1.0)
+        self.assertEqual(self.cible.nb_logins(), 1)
+        self.vieillir_session(31 * 60)
+        attendre(lambda: self.cible.nb_logins() == 2, 5, message="pas de renouvellement 30 min avant l'expiration")
+        self.assertEqual(self.cible.claims, 1)
+
+    # --- point 6 : choix Auto / Manuel fait relais arrêté
+    def test_mode_choisi_relais_arrete_pousse_au_demarrage(self):
+        self.relais.definir_mode("manuel")
+        self.relais.demarrer()
+        attendre(lambda: self.cible.source == "manual", 8, message="mode Manuel non poussé au serveur")
+        time.sleep(0.6)
+        self.assertEqual(self.relais.etat()["mode"], "manuel")
+        self.assertEqual(self.cible.etats[-1], {"source": "manual"})
+
+
+# ---------------------------------------------------------------- lancement et relance après mise à jour
+
+SCRIPT_LANCEMENT = r'''
+import json, os, sys, threading, time
+sys.path.insert(0, sys.argv[1])
+SCENARIO = json.loads(sys.argv[2])
+TRACE = sys.argv[3]
+from ametech import __main__ as principal, ui_server
+
+def tracer(quoi):
+    with open(TRACE, "a", encoding="utf-8") as f:
+        f.write(quoi + "\n")
+
+class FauxRelais:
+    def __init__(self):
+        self.actif = SCENARIO.get("relais_actif", False)
+    def demarrer(self):
+        self.actif = True
+        tracer("demarrer")
+    def arreter(self, journaliser=True):
+        self.actif = False
+    def etat(self):
+        return {"relais": {"phase": "en_ligne" if self.actif else "arret"}}
+
+class FauxUI:
+    def __init__(self, relais, *a, **k):
+        self.fin = threading.Event()
+        self.url = "http://127.0.0.1:1/"
+    def demarrer(self, port=None):
+        pass
+    def servir(self):
+        if SCENARIO.get("quitter"):
+            return
+        self.fin.wait(20)
+    def arreter(self):
+        self.fin.set()
+        time.sleep(0.5)  # le fil principal sort de servir() avant la fin de l'arrêt
+
+class FauxMaj:
+    def definir_arret(self, fonction):
+        self.fonction = fonction
+    def etat(self):
+        return {"statut": SCENARIO.get("statut_maj", "a_jour")}
+    def boucle(self, relais):
+        if SCENARIO.get("relance"):
+            time.sleep(0.3)
+            self.fonction(75)
+
+principal.Relais = FauxRelais
+ui_server.ServeurUI = FauxUI
+ui_server.maj = FauxMaj()
+ui_server.instance_active = lambda: None
+ui_server.ouvrir_fenetre = lambda url: None
+sys.exit(principal.main(["--sans-fenetre"]))
+'''
+
+
+class TestLancement(unittest.TestCase):
+    """__main__ : code de sortie 75 garanti, relais relancé après une mise à jour."""
+
+    def setUp(self):
+        self.dossier = Path(tempfile.mkdtemp(prefix="ametech-lancement-"))
+        self.addCleanup(shutil.rmtree, self.dossier, True)
+        self.script = self.dossier / "lancer.py"
+        self.script.write_text(SCRIPT_LANCEMENT, encoding="utf-8")
+        self.trace = self.dossier / "trace.txt"
+        self.env = {**os.environ, "AMETECH_DOSSIER": str(self.dossier / "reglages")}
+        self.ecrire_reglages(secret_totp=totp.nouveau_secret())
+
+    def ecrire_reglages(self, **champs):
+        ancien = os.environ.get("AMETECH_DOSSIER")
+        os.environ["AMETECH_DOSSIER"] = self.env["AMETECH_DOSSIER"]
+        try:
+            coffre.ecrire(champs)
+        finally:
+            os.environ["AMETECH_DOSSIER"] = ancien
+
+    def lire_reglages(self) -> dict:
+        ancien = os.environ.get("AMETECH_DOSSIER")
+        os.environ["AMETECH_DOSSIER"] = self.env["AMETECH_DOSSIER"]
+        try:
+            return coffre.lire()
+        finally:
+            os.environ["AMETECH_DOSSIER"] = ancien
+
+    def lancer(self, **scenario) -> tuple[int, list[str]]:
+        try:
+            self.trace.unlink()
+        except FileNotFoundError:
+            pass
+        windows = str(Path(__file__).resolve().parents[2])
+        p = subprocess.run([sys.executable, str(self.script), windows, json.dumps(scenario), str(self.trace)],
+                           env=self.env, capture_output=True, timeout=30)
+        traces = self.trace.read_text(encoding="utf-8").split() if self.trace.exists() else []
+        return p.returncode, traces
+
+    def test_code_75_gagne_toujours(self):
+        code, _ = self.lancer(relance=True)
+        self.assertEqual(code, 75)
+
+    def test_quitter_pendant_une_relance_en_attente_sort_en_75(self):
+        code, _ = self.lancer(quitter=True, statut_maj="pret")
+        self.assertEqual(code, 75)
+        code, _ = self.lancer(quitter=True, statut_maj="a_jour")
+        self.assertEqual(code, 0)
+
+    def test_relais_relance_apres_la_mise_a_jour(self):
+        code, traces = self.lancer(relance=True, relais_actif=True)
+        self.assertEqual(code, 75)
+        self.assertNotIn("demarrer", traces)
+        self.assertTrue(self.lire_reglages()["relais_apres_maj"])
+        # Nouvelle version : le relais repart tout seul, puis la marque est effacée.
+        code, traces = self.lancer(quitter=True)
+        self.assertEqual((code, traces), (0, ["demarrer"]))
+        self.assertFalse(self.lire_reglages()["relais_apres_maj"])
+        code, traces = self.lancer(quitter=True)
+        self.assertEqual(traces, [])
+
+    def test_relais_arrete_reste_arrete_apres_la_mise_a_jour(self):
+        code, _ = self.lancer(relance=True, relais_actif=False)
+        self.assertEqual(code, 75)
+        self.assertFalse(self.lire_reglages()["relais_apres_maj"])
+        self.assertEqual(self.lancer(quitter=True)[1], [])
+
+
 # ---------------------------------------------------------------- API locale
 
 class TestApiLocale(unittest.TestCase):

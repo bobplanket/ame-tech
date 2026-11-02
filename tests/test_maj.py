@@ -102,12 +102,14 @@ def fabriquer_release(version="3.0.1", url_zip="", graine=GRAINE, membres=None, 
 
 
 class FauxRelais:
-    def __init__(self, phase="arret", dernier_envoi=None):
-        self.phase, self.dernier_envoi = phase, dernier_envoi
+    def __init__(self, phase="arret", dernier_envoi=None, phase_depuis=None):
+        self.phase, self.dernier_envoi, self.phase_depuis = phase, dernier_envoi, phase_depuis
 
     def etat(self):
-        return {"version": "3.0.0", "relais": {"actif": self.phase != "arret", "phase": self.phase,
-                                               "dernier_envoi": self.dernier_envoi}}
+        r = {"actif": self.phase != "arret", "phase": self.phase, "dernier_envoi": self.dernier_envoi}
+        if self.phase_depuis is not None:
+            r["phase_depuis"] = self.phase_depuis
+        return {"version": "3.0.0", "relais": r}
 
 
 class BaseMaj(unittest.TestCase):
@@ -381,6 +383,25 @@ class TestRelaisEnLigne(BaseMaj):
         m = self.majeur(relais=FauxRelais("en_ligne", dernier_envoi=time.time() - 601))
         self.assertEqual(m.appliquer()["statut"], "pret")
 
+    def test_occupe_dans_toute_phase_autre_que_arret(self):
+        # Un relais qui se reconnecte ou cherche ProPresenter en plein culte reste prioritaire.
+        for phase in ("connexion", "recherche_pp", "erreur"):
+            for dernier in (time.time() - 5, None):
+                m = self.majeur(relais=FauxRelais(phase, dernier_envoi=dernier, phase_depuis=time.time() - 30))
+                self.assertTrue(m.relais_occupe(), (phase, dernier))
+        self.publier(self.github, CHEMIN_GITHUB)
+        m = self.majeur(relais=FauxRelais("connexion", dernier_envoi=time.time() - 5))
+        self.assertEqual(m.appliquer()["statut"], "disponible")
+        self.assertRienInstalle()
+
+    def test_silencieux_depuis_10_min_quelle_que_soit_la_phase(self):
+        for phase in ("connexion", "recherche_pp", "erreur", "en_ligne"):
+            m = self.majeur(relais=FauxRelais(phase, dernier_envoi=time.time() - 601))
+            self.assertFalse(m.relais_occupe(), phase)
+        # Jamais rien transmis : 10 min passées dans la même phase valent 10 min sans texte.
+        m = self.majeur(relais=FauxRelais("erreur", dernier_envoi=None, phase_depuis=time.time() - 601))
+        self.assertFalse(m.relais_occupe())
+
     def test_relais_arrete(self):
         self.publier(self.github, CHEMIN_GITHUB)
         self.assertEqual(self.majeur(relais=FauxRelais("arret", time.time())).appliquer()["statut"], "pret")
@@ -466,8 +487,52 @@ class TestUtilitaires(unittest.TestCase):
 
     def test_versions(self):
         self.assertEqual(maj.cle_version("3.0.1"), (3, 0, 1))
-        for mauvaise in ("3.0", "3.0.1.2", "03.0.1", "v3.0.1", "3.0.1 ", None, "3.a.1"):
-            self.assertIsNone(maj.cle_version(mauvaise), mauvaise)
+        for mauvaise in ("3.0", "3.0.1.2", "03.0.1", "v3.0.1", "3.0.1 ", None, "3.a.1",
+                         "3.0.1\n", "\uff13.0.1", "3.\u0660.1", "3.0.\u0967"):
+            self.assertIsNone(maj.cle_version(mauvaise), repr(mauvaise))
+
+    def test_telechargement_qui_goutte_abandonne_dans_le_delai(self):
+        """Un serveur qui envoie un octet à la fois ne doit pas tenir le fil au-delà du délai total."""
+        import socket
+        arret = threading.Event()
+        ecoute = socket.socket()
+        ecoute.bind(("127.0.0.1", 0))
+        ecoute.listen(1)
+        port = ecoute.getsockname()[1]
+
+        def goutte():
+            conn, _ = ecoute.accept()
+            with conn:
+                conn.recv(4096)
+                conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 1000000\r\n\r\n")
+                while not arret.wait(0.05):
+                    try:
+                        conn.sendall(b"x")
+                    except OSError:
+                        return
+
+        threading.Thread(target=goutte, daemon=True).start()
+        self.addCleanup(ecoute.close)
+        self.addCleanup(arret.set)
+        with tempfile.TemporaryDirectory() as d:
+            m = maj.Majeur(racine=Path(d), version_locale="3.0.0", cle=PUBLIQUE, autoriser_http_local=True,
+                           sources=[f"http://127.0.0.1:{port}/"], delai_reseau=2.0)
+            resultat = {}
+
+            def lire():
+                try:
+                    m._lire(f"http://127.0.0.1:{port}/zip", 10_000_000, 0.5, io.BytesIO())
+                    resultat["fin"] = "terminé"
+                except maj.ErreurMaj as exc:
+                    resultat["fin"] = str(exc)
+
+            debut = time.monotonic()
+            fil = threading.Thread(target=lire, daemon=True)
+            fil.start()
+            fil.join(6)
+            self.assertFalse(fil.is_alive(), "lecture toujours bloquée après 6 s")
+            self.assertIn("trop lent", resultat["fin"])
+            self.assertLess(time.monotonic() - debut, 4)
 
     def test_main_refuse_versions_invalides(self):
         with tempfile.TemporaryDirectory() as d:

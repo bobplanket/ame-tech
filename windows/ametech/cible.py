@@ -1,7 +1,9 @@
 """Client du serveur cible (tech.ame.paris ou secours) avec connexion par code TOTP.
 
 `POST /api/login {"code"}` avec le code du moment, puis cookie `badaboum_session`
-(12 h). Nouveau login avant l'expiration ou sur un 401. Le code est calculé à
+(12 h). Renouvellement anticipé (dès 11 h si rien ne passe depuis 1 min, au plus
+tard 30 min avant l'expiration), nouveau login sur un 401. Une `garde` (le relais)
+peut interdire un login avant tout envoi de code et apprend chaque réponse. Le code est calculé à
 l'heure du serveur quand l'écart d'horloge est connu, ce qui absorbe un PC mal
 réglé. Ni le secret, ni le code, ni le cookie ne sortent dans le journal.
 """
@@ -18,7 +20,9 @@ import urllib.request
 from ametech import journal, totp
 
 MAX_REPONSE = 1_000_000
-MARGE_COOKIE = 300  # secondes : on se reconnecte 5 min avant l'expiration du cookie
+MARGE_COOKIE = 300  # secondes : dernier filet, cookie tenu pour expiré 5 min avant la fin
+RENOUVELER_CALME = 11 / 12      # part de la durée du cookie (11 h sur 12) : renouveler si rien ne passe
+RENOUVELER_FORCE = 23 / 24      # (11 h 30 sur 12) : renouveler même pendant un passage
 
 
 class ErreurCible(Exception):
@@ -48,13 +52,16 @@ def valider_url(url: str) -> str:
 
 
 class Cible:
-    def __init__(self, url: str, fournisseur_secret, *, delai: float = 6.0):
+    def __init__(self, url: str, fournisseur_secret, *, delai: float = 6.0, garde=None):
         self.url = valider_url(url)
         self.fournisseur_secret = fournisseur_secret  # callable -> secret base32 ou ""
         self.delai = delai
+        self.garde = garde  # autoriser_login() lève ErreurCible pour refuser ; noter_login(statut)
         self.ecart_s: float | None = None  # heure serveur - heure locale
         self._cookie = ""
+        self._ouvert = 0.0
         self._expire = 0.0
+        self._prochain_renouvellement = 0.0
         self._verrou = threading.RLock()
         handlers = [_SansRedirection()]
         if urllib.parse.urlsplit(self.url).hostname in {"localhost", "127.0.0.1", "::1"}:
@@ -122,9 +129,34 @@ class Cible:
 
     def oublier_session(self) -> None:
         with self._verrou:
-            self._cookie, self._expire = "", 0.0
+            self._cookie, self._ouvert, self._expire = "", 0.0, 0.0
+            self._prochain_renouvellement = 0.0
+
+    def renouvellement_du(self, calme: bool) -> bool:
+        """Faut-il rouvrir la session maintenant ? Au calme dès 11 h, quoi qu'il arrive à 11 h 30."""
+        with self._verrou:
+            if not self._cookie:
+                return False
+            maintenant = time.time()
+            if maintenant < self._prochain_renouvellement:
+                return False
+            duree = max(1.0, self._expire - self._ouvert)
+            age = maintenant - self._ouvert
+            return age >= duree * RENOUVELER_FORCE or (calme and age >= duree * RENOUVELER_CALME)
+
+    def renouveler(self) -> None:
+        """Nouveau login avant l'expiration. En échec, l'ancien cookie reste valable et on attend avant de réessayer."""
+        try:
+            self.login()
+        except ErreurCible:
+            with self._verrou:
+                duree = max(1.0, self._expire - self._ouvert)
+                self._prochain_renouvellement = time.time() + min(300.0, duree / 24)
+            raise
 
     def login(self) -> None:
+        if self.garde is not None:
+            self.garde.autoriser_login()
         if self.ecart_s is None:
             try:
                 self.heure()
@@ -132,6 +164,8 @@ class Cible:
                 pass  # le login dira mieux ce qui ne va pas
         code = self.code_du_moment()
         statut, valeur, en_tetes = self._http("POST", "/api/login", {"code": code})
+        if self.garde is not None:
+            self.garde.noter_login(statut)
         if statut == 429:
             raise ErreurCible("Trop d'essais de code : le serveur bloque 15 minutes", 429, "bloque")
         if statut == 401:
@@ -152,7 +186,9 @@ class Cible:
             raise ErreurCible("Le serveur n'a pas ouvert de session", statut)
         journal.enregistrer_sensible(cookie)
         with self._verrou:
-            self._cookie, self._expire = cookie, time.time() + duree
+            self._ouvert = time.time()
+            self._cookie, self._expire = cookie, self._ouvert + duree
+            self._prochain_renouvellement = 0.0
         journal.log("info", "connexion", "Session ouverte sur " + self.url)
 
     def requete(self, methode: str, chemin: str, corps=None):
